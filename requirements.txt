@@ -1,0 +1,7 @@
+streamlit
+chromadb
+pillow
+sentence-transformers
+easyocr
+numpy
+streamlit-paste-button
