@@ -1,12 +1,14 @@
 import os
 import uuid
 import math
+import shutil  # Dùng để xóa thư mục
 import streamlit as st
 import chromadb
 from PIL import Image
 from sentence_transformers import SentenceTransformer
 import easyocr
 import numpy as np
+from streamlit_paste_button import paste_image_button
 
 # Tắt các cảnh báo không cần thiết từ Hugging Face & PyTorch
 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
@@ -20,7 +22,7 @@ st.set_page_config(
     layout="wide"
 )
 
-# Custom CSS giao diện hiện đại & mượt mà
+# Custom CSS nâng cấp giao diện mượt mà & hiện đại
 st.markdown("""
 <style>
     .stApp {
@@ -77,6 +79,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+CHROMA_DB_DIR = "./chroma_db"
 IMAGE_STORAGE_DIR = "./registered_images"
 os.makedirs(IMAGE_STORAGE_DIR, exist_ok=True)
 
@@ -91,7 +94,7 @@ def load_ocr_reader():
 
 @st.cache_resource(show_spinner=False)
 def init_vector_db():
-    client = chromadb.PersistentClient(path="./chroma_db")
+    client = chromadb.PersistentClient(path=CHROMA_DB_DIR)
     return client.get_or_create_collection(
         name="food_products",
         metadata={"hnsw:space": "cosine"}
@@ -125,37 +128,68 @@ st.markdown("""
 
 collection = init_vector_db()
 
-tab1, tab2, tab3 = st.tabs(["🔎 Tra Cứu Hình Ảnh", "➕ Đăng Ký Bao Bì Mới", "📋 Danh Sách Bao Bì Đã Lưu"])
+tab1, tab2, tab3 = st.tabs(["🔎 Tra Cứu Hình Ảnh", "➕ Đăng Ký Bao Bì Mới", "📋 Danh Sách & Quản Lý"])
 
 # TAB 1: TRA CỨU BAO BÌ
 with tab1:
     col1, col2 = st.columns([1, 1], gap="large")
     
+    if "search_paste_key" not in st.session_state:
+        st.session_state.search_paste_key = 0
+    if "search_image" not in st.session_state:
+        st.session_state.search_image = None
+        
     with col1:
         with st.container(border=True):
-            st.subheader("1. Chọn file ảnh bao bì từ máy tính")
-            
-            uploaded_file = st.file_uploader(
-                "Kéo thả file ảnh vào đây hoặc click 'Browse files' (có thể dùng Ctrl+V):", 
-                type=["jpg", "jpeg", "png", "webp"], 
-                key="search_uploader"
+            st.subheader("1. Tải lên, Chụp ảnh hoặc Dán ảnh")
+            source_option = st.radio(
+                "Nguồn ảnh:", 
+                ["Tải file lên (Upload)", "Dán ảnh từ Clipboard (Copy trên máy tính)", "Chụp từ Camera"], 
+                horizontal=True,
+                key="search_source_opt"
             )
             
-            if uploaded_file:
-                query_image = Image.open(uploaded_file)
-                st.image(query_image, caption="Ảnh bao bì đã chọn", use_container_width=True)
+            if source_option == "Tải file lên (Upload)":
+                uploaded_file = st.file_uploader("Kéo thả hoặc chọn file ảnh bao bì:", type=["jpg", "jpeg", "png", "webp"], key=f"search_uploader_{st.session_state.search_paste_key}")
+                if uploaded_file:
+                    st.session_state.search_image = Image.open(uploaded_file)
+                    
+            elif source_option == "Dán ảnh từ Clipboard (Copy trên máy tính)":
+                st.write("Sao chép (Copy) file ảnh hoặc ảnh từ màn hình, sau đó bấm nút:")
+                btn_col_a, btn_col_b = st.columns([3, 2])
+                with btn_col_a:
+                    paste_result = paste_image_button(
+                        label="📋 Click vào đây để Dán ảnh đã Copy",
+                        background_color="#2563EB",
+                        text_color="#FFFFFF",
+                        hover_background_color="#1D4ED8",
+                        key=f"paste_search_btn_{st.session_state.search_paste_key}"
+                    )
+                    if paste_result.image_data is not None:
+                        st.session_state.search_image = paste_result.image_data
+                with btn_col_b:
+                    if st.button("❌ Xóa ảnh", key="clear_search_img", use_container_width=True):
+                        st.session_state.search_image = None
+                        st.session_state.search_paste_key += 1
+                        st.rerun()
+                    
+            else:
+                camera_file = st.camera_input("Chụp ảnh trực tiếp bao bì:", key=f"search_camera_{st.session_state.search_paste_key}")
+                if camera_file:
+                    st.session_state.search_image = Image.open(camera_file)
+            
+            if st.session_state.search_image is not None:
+                st.image(st.session_state.search_image, caption="Ảnh bao bì hiện tại", use_container_width=True)
                 threshold = st.slider("Ngưỡng tin cậy hình ảnh (%)", min_value=50, max_value=95, value=70, step=5) / 100.0
                 search_btn = st.button("🚀 Bắt đầu Tra Cứu", type="primary", use_container_width=True)
-            else:
-                query_image = None
 
     with col2:
         with st.container(border=True):
             st.subheader("2. Kết quả nhận diện")
-            if query_image is not None and 'search_btn' in locals() and search_btn:
+            if st.session_state.search_image is not None and 'search_btn' in locals() and search_btn:
                 with st.spinner("⚡ AI đang xử lý siêu tốc..."):
-                    detected_text = extract_text_from_image(query_image)
-                    query_vector = get_image_embedding(query_image)
+                    detected_text = extract_text_from_image(st.session_state.search_image)
+                    query_vector = get_image_embedding(st.session_state.search_image)
                     results = collection.query(query_embeddings=[query_vector], n_results=5)
                     
                     if not results['ids'] or not results['ids'][0]:
@@ -215,6 +249,11 @@ with tab1:
 with tab2:
     with st.container(border=True):
         st.subheader("Đăng Ký Bao Bì Mẫu Mới")
+        
+        if "reg_paste_key" not in st.session_state:
+            st.session_state.reg_paste_key = 0
+        if "reg_image" not in st.session_state:
+            st.session_state.reg_image = None
 
         col_a, col_b = st.columns(2, gap="medium")
         
@@ -226,24 +265,57 @@ with tab2:
             packaging_spec = st.text_area("Tiêu chuẩn đóng gói *", placeholder="VD: Đóng gói 6 kg/thùng...")
 
         with col_b:
-            uploaded_reg = st.file_uploader("Tải file ảnh mẫu bao bì từ máy tính *", type=["jpg", "jpeg", "png", "webp"], key="reg_uploader")
-            reg_image = None
-            if uploaded_reg:
-                reg_image = Image.open(uploaded_reg)
-                st.image(reg_image, caption="Ảnh mẫu chuẩn bị lưu", use_container_width=True)
+            st.write("**Tải lên ảnh mẫu bao bì ***")
+            img_source_reg = st.radio(
+                "Cách nhập ảnh mẫu:", 
+                ["Tải file lên (Upload)", "Dán ảnh từ Clipboard (Copy trên máy tính)"], 
+                horizontal=True,
+                key="reg_img_source"
+            )
+            
+            if img_source_reg == "Tải file lên (Upload)":
+                uploaded_reg = st.file_uploader("Kéo thả hoặc chọn file ảnh bao bì mẫu:", type=["jpg", "jpeg", "png", "webp"], key=f"reg_uploader_{st.session_state.reg_paste_key}")
+                if uploaded_reg:
+                    st.session_state.reg_image = Image.open(uploaded_reg)
+                if st.session_state.reg_image is not None:
+                    if st.button("❌ Xóa ảnh", key="clear_reg_upload_img"):
+                        st.session_state.reg_image = None
+                        st.session_state.reg_paste_key += 1
+                        st.rerun()
+            else:
+                st.write("Sao chép (Copy) ảnh từ máy tính, sau đó nhấn nút:")
+                paste_col, clear_col = st.columns([3, 2])
+                with paste_col:
+                    paste_reg_btn = paste_image_button(
+                        label="📋 Click vào đây để Dán ảnh đã Copy",
+                        background_color="#2563EB",
+                        text_color="#FFFFFF",
+                        hover_background_color="#1D4ED8",
+                        key=f"paste_reg_btn_{st.session_state.reg_paste_key}"
+                    )
+                    if paste_reg_btn.image_data is not None:
+                        st.session_state.reg_image = paste_reg_btn.image_data
+                with clear_col:
+                    if st.button("❌ Xóa ảnh", key="clear_reg_img", use_container_width=True):
+                        st.session_state.reg_image = None
+                        st.session_state.reg_paste_key += 1
+                        st.rerun()
+
+            if st.session_state.reg_image is not None:
+                st.image(st.session_state.reg_image, caption="Ảnh mẫu chuẩn bị lưu", use_container_width=True)
 
         submitted = st.button("💾 Lưu Bao Bì Vào Database", type="primary", use_container_width=True)
         if submitted:
-            if not product_id or not product_name or not customer_name or not package_type or not packaging_spec or reg_image is None:
-                st.error("Vui lòng điền đầy đủ thông tin có dấu (*) và chọn ảnh mẫu từ máy tính!")
+            if not product_id or not product_name or not customer_name or not package_type or not packaging_spec or st.session_state.reg_image is None:
+                st.error("Vui lòng điền đầy đủ thông tin có dấu (*) và chọn/dán ảnh mẫu!")
             else:
                 try:
                     db_id = product_id.strip()
                     saved_img_filename = f"{db_id}_{customer_name}.png".replace(" ", "_").replace("/", "_")
                     saved_img_path = os.path.join(IMAGE_STORAGE_DIR, saved_img_filename)
                     
-                    sample_img = optimize_image_for_ai(reg_image, max_size=1024)
-                    sample_img.save(saved_img_path)
+                    sample_img = optimize_image_for_ai(st.session_state.reg_image, max_size=1024)
+                    sample_img.convert('RGB').save(saved_img_path)
                     
                     vector = get_image_embedding(sample_img)
                     collection.add(
@@ -258,12 +330,54 @@ with tab2:
                             "image_path": saved_img_path
                         }]
                     )
+                    st.session_state.reg_image = None
+                    st.session_state.reg_paste_key += 1
                     st.success(f"🎉 Đã đăng ký thành công bao bì **{product_name}** (Mã: `{db_id}`)!")
                 except Exception as e:
                     st.error(f"Lỗi khi lưu dữ liệu (Mã bao bì có thể đã tồn tại): {e}")
 
-# TAB 3: DANH SÁCH & QUẢN LÝ
+# TAB 3: DANH SÁCH & QUẢN LÝ (ĐÃ THÊM NÚT RESET DATABASE CHUYÊN DỤNG)
 with tab3:
+    st.header("Quản lý Cơ sở dữ liệu Bao bì")
+    
+    # Khu vực Admin đặc biệt để Reset dữ liệu
+    with st.expander("⚡ KHU VỰC QUẢN TRỊ (CHỈ DÙNG KHI CẦN RESET)"):
+        st.error("⚠️ HÀNH ĐỘNG NÀY SẼ XÓA TOÀN BỘ DỮ LIỆU ĐANG CÓ TRÊN CLOUD!")
+        st.markdown("""
+        * Toàn bộ ảnh mẫu đã nạp sẽ bị xóa.
+        * Toàn bộ database tra cứu vector sẽ bị xóa về trạng thái trống.
+        * Hãy chắc chắn bạn đã có bản sao dữ liệu trước khi thực hiện.
+        """)
+        
+        # Thêm biến xác nhận để tránh bấm nhầm
+        confirm_reset = st.checkbox("Tôi xác nhận muốn xóa toàn bộ database (Không thể hoàn tác)")
+        if confirm_reset:
+            reset_db_btn = st.button("🔥 CHẤP NHẬN RESET TOÀN BỘ DATABASE", type="secondary", use_container_width=True)
+            if reset_db_btn:
+                with st.spinner("Đang thực hiện Reset database... Vui lòng không đóng trang web."):
+                    try:
+                        # 1. Xóa Database Chroma
+                        if os.path.exists(CHROMA_DB_DIR):
+                            shutil.rmtree(CHROMA_DB_DIR)
+                        
+                        # 2. Xóa Thư mục ảnh mẫu
+                        if os.path.exists(IMAGE_STORAGE_DIR):
+                            shutil.rmtree(IMAGE_STORAGE_DIR)
+                        
+                        st.success("🎉 Reset hoàn tất! Hệ thống đã trống dữ liệu.")
+                        st.warning("🔄 Trang web sẽ tự động tải lại sau 3 giây.")
+                        # Tải lại trang sau khi xóa
+                        st.cache_resource.clear()
+                        import time
+                        time.sleep(3)
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Lỗi khi Reset database: {e}")
+
+    # Hiển thị danh sách như bình thường
+    st.markdown("---")
+    st.subheader("📋 Danh sách bao bì đang lưu trữ")
+    
     all_data = collection.get()
     
     if not all_data['ids']:
@@ -360,7 +474,7 @@ with tab3:
                                         file_ext = os.path.splitext(new_img_file.name)[1]
                                         saved_img_filename = f"{new_prod_id}_{new_cust_name}{file_ext}".replace(" ", "_").replace("/", "_")
                                         current_img_path = os.path.join(IMAGE_STORAGE_DIR, saved_img_filename)
-                                        sample_img.save(current_img_path)
+                                        sample_img.convert('RGB').save(current_img_path)
 
                                     updated_metadata = {
                                         "product_id": new_prod_id,
